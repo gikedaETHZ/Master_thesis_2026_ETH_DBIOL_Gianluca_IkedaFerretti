@@ -1,0 +1,392 @@
+---
+title: "PGLS analysis rodentia"
+author: "Gianluca"
+date: "2026-03-05"
+output: html_document
+---
+# Setup
+```{r}
+suppressPackageStartupMessages({
+  library(ape)
+  library(caper)
+  library(tidyverse)
+  library(writexl)
+})
+
+base_path <- "//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis"
+
+# All data for PGLS (already wide, merged, deduplicated)
+
+setwd("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis")
+
+combined_dt <- read.csv("main_dataset.csv") %>%
+  filter(order == "Rodentia", !is.na(log10_body_mass_g))
+
+# Long format for faceted plots only
+
+setwd("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/PGLS_data/")
+
+dt_QE <- read_tsv("rodentia_QE_regions_290426.tsv")
+
+setwd("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/taxonomy_files/")
+
+selected_clades <- read_tsv("rodentia_species_clade_mapping.tsv")
+
+plot_data <- dt_QE %>%
+  inner_join(combined_dt %>% select(species, log10_body_mass_g), by = "species") %>%
+  inner_join(selected_clades, by = "species")
+
+plot_data_sum <- combined_dt %>%
+  inner_join(selected_clades, by = "species")
+
+```
+
+# Prune phylogenetic tree
+```{r}
+# Get phylogenetic tree
+
+phy_tree <- read.tree(file.path(base_path, "PGLS_data", "phylo_trees", "all_species_timetree.nwk"))
+
+# See if rows of data match tips of phylogenetic tree and drop tips with no correspondence in trait data
+
+comp_tree_data <- comparative.data(data=combined_dt, 
+                                   phy = phy_tree,
+                                   names.col = "species",
+                                   na.omit = FALSE)
+
+print(comp_tree_data)
+```
+
+# Generate models
+```{r}
+# Generate all models
+# If something goes wrong it is in this table
+
+model_config <- tribble(
+ ~model_id, ~response_var,           ~metric,    ~region,
+ 1,         "QE_sum_QE_region_1",    "QE_sum",   "QE_region_1",
+ 2,         "QE_sum_QE_region_2",    "QE_sum",   "QE_region_2",
+ 3,         "QE_sum_QE_region_3",    "QE_sum",   "QE_region_3",
+ 4,         "E_count_QE_region_1",   "E_count",  "QE_region_1",
+ 5,         "E_count_QE_region_2",   "E_count",  "QE_region_2",
+ 6,         "E_count_QE_region_3",   "E_count",  "QE_region_3",
+ 7,         "E_ratio_QE_region_1",   "E_ratio",  "QE_region_1",
+ 8,         "E_ratio_QE_region_2",   "E_ratio",  "QE_region_2",
+ 9,         "E_ratio_QE_region_3",   "E_ratio",  "QE_region_3",
+ 10,        "Neg_charge_QE_region_1","Neg_charge","QE_region_1",
+ 11,        "Neg_charge_QE_region_2","Neg_charge","QE_region_2",
+ 12,        "Neg_charge_QE_region_3","Neg_charge","QE_region_3",
+ 13,        "Net_charge_QE_region_1","Net_charge","QE_region_1",
+ 14,        "Net_charge_QE_region_2","Net_charge","QE_region_2",
+ 15,        "Net_charge_QE_region_3","Net_charge","QE_region_3",
+ 16,        "Net_charge_no_H_QE_region_1","Net_charge_no_H","QE_region_1",
+ 17,        "Net_charge_no_H_QE_region_2","Net_charge_no_H","QE_region_2",
+ 18,        "Net_charge_no_H_QE_region_3","Net_charge_no_H","QE_region_3",
+ 19,        "QE_sum_total",          "QE_total", "total",
+ 20,        "E_sum_total",           "E_total",  "total"
+)
+
+print(model_config)
+
+# Fit all determined models
+
+fit_pgls_model <- function(response_var, data) {
+  formula <- as.formula(paste(response_var, "~ log10_body_mass_g"))
+  pgls(formula, data = data, lambda = "ML")
+}
+
+# Fit all models and store in a named list
+models <- model_config %>%
+ mutate(model = map(response_var, ~fit_pgls_model(.x, comp_tree_data))) %>%
+ select(model_id, metric, region, model)
+
+# Create named list for easy access: models_list$QE_sum$QE_region_1
+models_list <- models %>%
+ group_by(metric) %>%
+ group_split() %>%
+ set_names(map_chr(., ~.x$metric[1])) %>%
+ map(~set_names(.x$model, .x$region))
+
+```
+# Model diagnostics
+```{r}
+# Diagnostics function for single PGLS model
+
+pgls_diagnostics <- function(mod, label = "", save_dir = NULL) {
+  
+  res <- residuals(mod, phylo = TRUE)
+  fit <- fitted(mod)
+  
+  if (!is.null(save_dir)){
+    png(file.path(save_dir, paste0("diag_", label, ".png")), 
+        width = 9, height = 9, units = "in", res = 600)
+  }
+  
+  par(mfrow = c(2,2), oma = c(0,0,2,0))
+  
+  full_lambda <- unname(mod$param["lambda"])
+  
+   ## QQ plot (normality of residuals)
+  qqnorm(res, main = "Normal Q-Q", 
+         pch = 19,col = "steelblue",
+         xlab = "Theoretical quantiles",
+         ylab = "Phylogenetic residuals")
+  qqline(res, col = "firebrick", lwd = 2)
+  
+  ## Residuals vs fitted (homogeneity of variation)
+  plot(fit, res,
+       xlab = "Fitted values", 
+       ylab = "Phylogenetic residuals",
+       main = "Residuals vs Fitted", pch = 19, col = "steelblue")
+  abline(h = 0, 
+         lty = 2, 
+         col = "grey50")
+  lines(lowess(fit, res), 
+        col = "firebrick", 
+        lwd = 2)
+  
+  
+  ## Influence of particular data (LOO)
+  dat <- mod$data$data
+  phy <- mod$data$phy
+  form <- formula(mod)
+  
+  loo_slopes <- sapply(seq_len(nrow(dat)), function(i) {
+    dat_i <- dat[-i, , drop = FALSE]
+    dat_i$species <- rownames(dat_i)
+    cd_i <- tryCatch(
+      comparative.data(phy = phy, data = dat_i, names.col = "species",
+                       na.omit = FALSE, warn.dropped = FALSE),
+       error = function(e) NULL
+    )
+    if (is.null(cd_i)) return(NA)
+    m_i <- tryCatch(
+      pgls(form, data = cd_i, lambda = full_lambda),
+      error = function(e) tryCatch(
+        pgls(form, data = cd_i, lambda = 1),
+        error = function(e2) NULL
+      )
+    )
+    if (is.null(m_i)) return(NA)
+    coef(m_i)[2]
+  })
+    
+    full_slope <- coef(mod)[2]
+    full_se <- summary(mod)$coefficients[2,2]
+    dfbetas <- (loo_slopes - full_slope) / full_se
+    
+    plot(seq_along(dfbetas), dfbetas,
+         xlab = "Species index",
+         ylab = "Standardised slope change (dfbeta)",
+         main = "Leave-one-out influence",
+         pch = 19, col = "steelblue")
+    abline(h = 0, lty = 2, col = "grey50")
+    abline(h = c(-1,1), lty = 3, col = "firebrick")
+  
+  
+  ## Lambda profile
+  lam_prof <- tryCatch(
+    pgls.profile(mod, which = "lambda"),
+    error = function(e) NULL
+  )
+  if (!is.null(lam_prof)){
+    plot(lam_prof, main = expression(lambda~"likelihood profile"))
+  } else {
+    plot.new(); title(expression(lambda~"profile unavailable"))
+  }
+  
+  mtext(label, outer = TRUE, cex = 1.3, font = 2)
+  par(mfrow = c(1,1))
+  
+  if (!is.null(save_dir)) dev.off()
+  
+  ## summary table
+  invisible(data.frame(
+    label = label,
+    lambda = round(unname(mod$param["lambda"]), 3),
+    slope = round(unname(full_slope), 4),
+    slope_p = round(summary(mod)$coefficients[2,4], 4),
+    max_abs_dfbeta = round(max(abs(dfbetas), na.rm = TRUE), 3),
+    n_influential = sum(abs(dfbetas) > 1, na.rm = TRUE),
+    max_abs_resid = round(max(abs(res)), 3)
+  ))
+}
+
+# Run diagnostics function
+
+diag_dir <- file.path(base_path, "plots", "diagnostic_rodentia")
+dir.create(diag_dir, showWarnings = FALSE, recursive = TRUE)
+
+while (!is.null(dev.list())) dev.off()
+
+model_diagnosis <- models %>%
+  mutate(
+    label = paste0(metric, "_", region),
+    diag = map2(model, label, ~pgls_diagnostics(
+      .x, label = .y, save_dir = diag_dir
+    ))
+  ) %>%
+  select(diag) %>%
+  unnest(diag)
+
+write.csv(model_diagnosis,
+          file.path(diag_dir, "diagnostic_summary_rodentia.csv"),
+          row.names = FALSE)
+```
+
+# Make summary table of models with diagnostics
+```{r}
+
+summary_table <- models %>%
+  mutate(
+    n         = map_int(model, ~ nrow(.x$data$data)),
+    lambda    = map_dbl(model, ~ unname(.x$param["lambda"])),
+    intercept = map_dbl(model, ~ unname(coef(.x)[1])),
+    slope     = map_dbl(model, ~ unname(coef(.x)[2])),
+    se        = map_dbl(model, ~ summary(.x)$coefficients[2, 2]),
+    p_value   = map_dbl(model, ~ summary(.x)$coefficients[2, 4]),
+    r_squared = map_dbl(model, ~ summary(.x)$r.squared),
+    ci_lo     = slope - 1.96 * se,
+    ci_hi     = slope + 1.96 * se,
+  ) %>%
+select(metric, region, n, lambda, intercept, slope, se, ci_hi, ci_lo, p_value, r_squared)
+
+write_xlsx(
+  list(
+    All_metrics = summary_table,
+    Diagnostics = model_diagnosis
+  ),
+  path = file.path(base_path, "PGLS_summary_tables", "rodentia_PGLS_all_results.xlsx")
+)
+```
+
+# Generate plots
+```{r}
+# CONFIDENCE BAND FUNCTION
+compute_pgls_band <- function(mod, x_range) {
+ b <- coef(mod)
+ fit <- b[1] + b[2] * x_range
+ 
+ X_pred <- cbind(1, x_range)
+ X <- mod$x
+ Vt <- mod$Vt
+ RMS <- mod$RMS[1, 1]
+ 
+ V_inv <- solve(Vt)
+ XtVinvX_inv <- solve(t(X) %*% V_inv %*% X)
+ vcov_beta <- RMS * XtVinvX_inv
+ 
+ var_fit <- rowSums((X_pred %*% vcov_beta) * X_pred)
+ se_fit <- sqrt(var_fit)
+ 
+ data.frame(
+   log10_body_mass_g = x_range,
+   fit = fit,
+   lwr = fit - 1.96 * se_fit,
+   upr = fit + 1.96 * se_fit
+ )
+}
+
+
+# GENERATE BANDS AND LABELS FOR ALL MODELS
+
+x_data <- plot_data %>%
+ distinct(species, .keep_all = TRUE) %>%
+ filter(!is.na(log10_body_mass_g)) %>%
+ pull(log10_body_mass_g)
+
+x_range <- seq(min(x_data), max(x_data), length.out = 100)
+
+# Generate bands for all models
+all_bands <- models %>%
+ mutate(
+   band = map(model, ~compute_pgls_band(.x, x_range))
+ ) %>%
+ select(metric, region, band) %>%
+ unnest(band)
+
+# Generate labels for all models
+all_labels <- models %>%
+ mutate(
+   lambda = map_dbl(model, ~.x$param["lambda"]),
+   p_value = map_dbl(model, ~summary(.x)$coefficients[2, 4]),
+   label = sprintf("λ = %.2f, p = %.3f", lambda, p_value)
+ ) %>%
+ select(metric, region, label)
+
+# FUNCTION FOR PLOTTING
+
+
+plot_pgls_by_metric <- function(metric_name, y_var, y_label, title) {
+ 
+ # Filter bands and labels for this metric
+ bands <- all_bands %>% filter(metric == metric_name)
+ labels <- all_labels %>% filter(metric == metric_name)
+ 
+ # Filter plot data to the correct y variable
+ plot_df <- plot_data %>%
+   rename(y_value = !!sym(y_var))
+ 
+ ggplot(plot_df, aes(x = log10_body_mass_g, y = y_value, colour = clade)) +
+   geom_point(alpha = 0.6, size = 2) +
+   geom_smooth(method = "lm", se = FALSE, color = "steelblue", linewidth = 0.8) +
+   geom_ribbon(data = bands,
+               aes(x = log10_body_mass_g, ymin = lwr, ymax = upr),
+               fill = "firebrick", alpha = 0.15, inherit.aes = FALSE) +
+   geom_line(data = bands,
+             aes(x = log10_body_mass_g, y = fit),
+             color = "firebrick", linewidth = 0.8, linetype = "dashed",
+             inherit.aes = FALSE) +
+   geom_text(data = labels,
+             aes(x = -Inf, y = Inf, label = label),
+             hjust = -0.05, vjust = 1.5, size = 6, inherit.aes = FALSE) +
+   facet_wrap(~region, scales = "free_y", ncol = 1) +
+   labs(
+     x = expression(log[10] ~ body ~ mass ~ (g)),
+     y = y_label,
+     title = title
+   ) +
+   theme_classic() +
+   theme(
+     axis.text = element_text(size = 14),
+     axis.title = element_text(size = 16),
+     plot.title = element_text(size = 18),
+     legend.text = element_text(size = 14),
+     legend.title = element_text(size = 16)
+   )
+}
+
+
+# Generate plots
+
+
+plot_path <- file.path(base_path, "plots")
+
+# QE_sum plot
+p_QE_sum <- plot_pgls_by_metric(
+ metric_name = "QE_sum",
+ y_var = "QE_sum",
+ y_label = "QE sum",
+ title = "Rodentia: QE sum vs body mass"
+)
+ggsave("PGLS_rodentia_QE_sum_090526.png", p_QE_sum, path = plot_path, width = 10, height = 10, dpi = 600)
+
+# E_count plot
+p_E_count <- plot_pgls_by_metric(
+ metric_name = "E_count",
+ y_var = "E_count",
+ y_label = "E count",
+ title = "Rodentia: E count vs body mass"
+)
+ggsave("PGLS_rodentia_E_count_090526.png", p_E_count, path = plot_path, width = 10, height = 10, dpi = 600)
+
+# E_ratio plot
+p_E_ratio <- plot_pgls_by_metric(
+ metric_name = "E_ratio",
+ y_var = "E_ratio",
+ y_label = "E ratio",
+ title = "Rodentia: E ratio vs body mass"
+)
+ggsave("PGLS_rodentia_E_ratio_090526.png", p_E_ratio, path = plot_path, width = 10, height = 10, dpi = 600)
+
+```
