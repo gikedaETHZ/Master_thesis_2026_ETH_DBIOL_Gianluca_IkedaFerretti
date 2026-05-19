@@ -1,0 +1,357 @@
+---
+title: "Curated dataset"
+author: "Gianluca"
+date: "2026-03-16"
+output: html_document
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(patchwork)
+  library(ape)
+})
+
+# Set working directory and upload data
+
+## Trait data
+
+setwd("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/excel_sheets/COMBINE_dataset/")
+
+trait_data <- read_csv("trait_data_reported.csv") %>%
+  mutate(
+    species = gsub(" ", "_", species),
+    adult_mass_g = as.numeric(adult_mass_g),
+    log10_body_mass_g = log10(adult_mass_g)
+  )
+
+## QE data
+
+setwd("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/PGLS_data/")
+
+QE_data <- bind_rows(
+  read_tsv("primates_QE_regions_290426.tsv") %>% mutate(order = "Primates"),
+  read_tsv("rodentia_QE_regions_290426.tsv") %>% mutate(order = "Rodentia"),
+  read_tsv("carnivora_QE_regions_290426.tsv") %>% mutate(order = "Carnivora"),
+  read_tsv("cetartiodactyla_QE_regions_290426.tsv") %>% mutate(order = "Cetartiodactyla")
+)
+
+### Pivot QE data wide
+
+QE_data <- QE_data %>%
+  pivot_wider(
+    id_cols = c(species, order),
+    names_from = region,
+    values_from = c(E_count, QE_sum, E_ratio, Neg_charge, Net_charge, Net_charge_no_H)
+  )
+
+
+# COMBINE dataset contains multiple entries for traits
+# Deduplication was carried out by calculating the sum of multiple body mass entries
+
+trait_data <- trait_data %>%
+  group_by(species) %>%
+  summarise(
+    family = first(na.omit(family)),
+    marine = first(na.omit(marine)),
+    log10_body_mass_g = mean(log10_body_mass_g, na.rm = TRUE)
+  )
+
+# Merge trait and QE data
+
+final_dataset <- QE_data %>%
+  dplyr::left_join(
+    trait_data %>% dplyr::select(c("species", "family", "log10_body_mass_g", "marine")),
+    by = "species"
+  ) %>%
+  dplyr::select(species, order, family, marine,
+                starts_with("QE_sum"),
+                starts_with("E_count"),
+                starts_with("E_ratio"),
+                starts_with("Neg_charge"),
+                starts_with("Net_charge"),
+                log10_body_mass_g
+                ) %>%
+  mutate(
+    E_sum_total = E_count_QE_region_1 + E_count_QE_region_2 + E_count_QE_region_3,
+    QE_sum_total = QE_sum_QE_region_1 + QE_sum_QE_region_2 + QE_sum_QE_region_3
+  ) %>%
+  as.data.frame()
+
+# Many species do not have a body mass entry and family in COMBINE
+# To fill in missing values for some species values from different databases or closely related species in COMBINE were used. (see supp. Excel sheet)
+
+final_dataset %>% filter(is.na(log10_body_mass_g)) %>% pull(species)
+
+final_dataset <- final_dataset %>%
+  mutate(
+    log10_body_mass_g = case_when(
+      species == "Cercopithecus_albogularis" ~ log10(5280), #
+      species == "Plecturocebus_cupreus" ~ log10(1070),
+      species == "Nomascus_annamensis" ~ log10(7000),
+      species == "Cephalopachus_bancanus" ~ log10(120),
+      species == "Cebus_imitator" ~ log10(3220),
+      species == "Cricetomys_ansorgei" ~ log10(1400),
+      species == "Tamias_sibiricus" ~ log10(94.15),
+      species == "Cavia_porcellus" ~ log10(399),
+      species == "Spilogale_interrupta" ~ log10(612),
+      species == "Neogale_vison" ~ log10(1075),
+      species == "Felis_catus" ~ log10(2884.8),
+      species == "Bos_taurus" ~ log10(618642.42),
+      species == "Capra_hircus" ~ log10(47386.47),
+      species == "Ovis_aries" ~ log10(39097.89),
+      species == "Bubalus_bubalis" ~ log10(929500.97),
+      species == "Vicugna_pacos" ~ log10(50000),
+      species == "Camelus_bactrianus" ~ log10(554515.91),
+      species == "Giraffa_tippelskirchi" ~ log10(800000),
+      species == "Lama_glama" ~ log10(115000),
+      
+      TRUE ~ log10_body_mass_g
+    )
+  ) %>%
+  mutate(
+    family = case_when(
+      species == "Cercopithecus_albogularis" ~ "Cercopithecidae",
+      species == "Plecturocebus_cupreus" ~ "Pitheciidae",
+      species == "Nomascus_annamensis" ~ "Hylobatidae",
+      species == "Cephalopachus_bancanus" ~ "Tarsiidae",
+      species == "Cebus_imitator" ~ "Cebidae",
+      species == "Cricetomys_ansorgei" ~ "Nesomyidae",
+      species == "Tamias_sibiricus" ~ "Sciuridae",
+      species == "Cavia_porcellus" ~ "Caviidae",
+      species == "Spilogale_interrupta" ~ "Mephitidae",
+      species == "Neogale_vison" ~ "Mustelidae",
+      species == "Felis_catus" ~ "Felidae",
+      species == "Bos_taurus" ~ "Bovidae",
+      species == "Capra_hircus" ~ "Bovidae",
+      species == "Ovis_aries" ~ "Bovidae",
+      species == "Bubalus_bubalis" ~ "Bovidae",
+      species == "Balaenoptera_ricei" ~ "Balaenopteridae",
+      species == "Vicugna_pacos" ~ "Camelidae",
+      species == "Camelus_bactrianus" ~ "Camelidae",
+      species == "Giraffa_tippelskirchi" ~ "Giraffidae",
+      species == "Lama_glama" ~ "Camelidae",
+      TRUE ~ family
+    )
+  ) %>%
+  mutate(
+    marine = ifelse(is.na(marine), 0, marine)
+    )
+    
+  
+# Add DPG sensitivity variables
+
+DPG_binary_list <- c("Felidae", "Viverridae", "Herpestidae", "Hyaenidae", "Eupleridae", "Nandiniidae", "Bovidae", "Cervidae", "Giraffidae", "Antilocapridae", "Moschidae", "Tragulidae")
+
+## Binary categorisation
+
+final_dataset <- final_dataset %>%
+  mutate(
+    DPG_binary = ifelse(
+      family %in% DPG_binary_list, 1, 0
+      )
+    )
+
+## Distinguish between groups
+
+DPG_feliformia <- c("Felidae", "Viverridae", "Herpestidae", "Hyaenidae", "Eupleridae", "Nandiniidae")
+  
+DPG_ruminantia <- c("Bovidae", "Cervidae", "Giraffidae", "Antilocapridae", "Moschidae", "Tragulidae")
+
+final_dataset <- final_dataset %>%
+  mutate(
+    DPG_non_binary = case_when(
+      family %in% DPG_feliformia ~ "Feliformia",
+      family %in% DPG_ruminantia ~ "Ruminantia",
+      TRUE ~ "Sensitive"
+    )
+  )
+
+# Add P50 and MS-BMR from Udroiu (2023)
+
+## Get data
+
+setwd("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/excel_sheets/")
+
+udroiu_dt <- read.csv("Udroiu2023.csv", fileEncoding = "latin1") %>%
+  rename_with(tolower) %>%
+  mutate(species = gsub(" ", "_", species)) %>%
+  filter(species != "") %>%
+  distinct(species, .keep_all = TRUE)
+
+## Merge with dataset
+
+final_dataset <- final_dataset %>%
+  dplyr::left_join(
+    udroiu_dt %>% dplyr::select(species, ms.bmr..w.g., hbp50..ph7.2.20.c.),
+    by = "species"
+  )
+
+final_dataset %>%
+  group_by(order) %>%
+  summarise(
+    total = n(),
+    has_p50 = sum(!is.na(hbp50..ph7.2.20.c.)),
+    pct = round(100*has_p50 / total)
+  )
+
+
+# Harmonise names species to phylogeny's nomenclature (Based on synonyms or closest relative present on Mammal Diversity Database, https://www.mammaldiversity.org/ as of 04.05.26). Drop 
+
+phylo_synonyms <- tribble(
+   ~data_name,                  ~tree_name,
+  "Alexandromys_fortis",       "Microtus_fortis",
+  "Physeter_macrocephalus",    "Physeter_catodon",
+  "Mustela_putorius",           "Mustela_putorius_furo",
+  "Eulemur_collaris",          "Eulemur_fulvus_collaris",
+  "Nomascus_annamensis",       "Nomascus_gabriellae",
+  "Spilogale_interrupta",      "Spilogale_gracilis"
+)
+
+final_dataset <- final_dataset %>%
+  left_join(phylo_synonyms, by = c("species" = "data_name")) %>%
+  mutate(species = coalesce(tree_name, species)) %>%
+  select(-tree_name)
+
+## Determine species that will be dropped for each order when using compartive.data function of caper.
+
+phy_tree <- read.tree(file.path("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis", "PGLS_data/phylo_trees/all_species_timetree.nwk"))
+
+dropped_table <- final_dataset %>% 
+  filter(!species %in% phy_tree$tip.label) %>%
+  select(species, order, family, log10_body_mass_g) %>%
+  arrange(order, species)
+
+write.csv(
+  dropped_table,
+  file = "//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/TableSX_species_dropped_from_phylogeny.csv",
+  row.names = FALSE
+)
+
+
+
+write.csv(final_dataset,
+          file.path("//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/",
+                    "main_dataset.csv"))
+```
+
+# Per-order × per-region summary table for all metrics
+```{r}
+orders <- c("Primates", "Carnivora", "Rodentia", "Cetartiodactyla")
+
+qe_summary <- final_dataset %>%
+  filter(order %in% orders) %>%
+  select(species, order,
+         starts_with("E_count_QE_region_"),
+         starts_with("QE_sum_QE_region_"),
+         starts_with("E_ratio_QE_region_"),
+         starts_with("Neg_charge_QE_region_"),
+         starts_with("Net_charge_QE_region_"),
+         starts_with("Net_charge_no_H_QE_region_")) %>%
+  pivot_longer(
+    cols = -c(species, order),
+    names_to = c("metric", "region"),
+    names_pattern = "(E_count|QE_sum|E_ratio|Neg_charge|Net_charge_no_H|Net_charge)_QE_region_(\\d)",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value)) %>%
+  group_by(metric, region, order) %>%
+  summarise(
+    n    = n(),
+    mean = round(mean(value), 2),
+    sd   = round(sd(value), 2),
+    min  = round(min(value), 2),
+    max  = round(max(value), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(metric, region, order)
+
+print(qe_summary, n = Inf)
+
+write.csv(
+  qe_summary,
+  file = "//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/TableSX_QE_distribution_summary:untrimmed.csv",
+  row.names = FALSE
+)
+
+```
+
+# Check for distribution of weight data (supplementary data analysis)
+
+```{r}
+bm_data <- final_dataset %>%
+  filter(order %in% orders, !is.na(log10_body_mass_g)) %>%
+  mutate(order = factor(order, levels = orders))
+
+# Extract sample size per order for visualisation
+n_per_order <- bm_data %>%
+  count(order) %>%
+  mutate(label = paste0(order, " (n = ", n, ")"))
+
+bm_data <- bm_data %>% 
+  left_join(n_per_order %>% select(order, label), by = "order") %>%
+  mutate(label = factor(label, levels = n_per_order$label))
+
+# Raw scale
+p_raw <- ggplot(bm_data, aes(x = 10^log10_body_mass_g)) +
+  geom_histogram(bins = 25, 
+                 fill = "steelblue", 
+                 color = "white") +
+  facet_wrap(~label, 
+             scales = "free",
+             ncol = 4) +
+  labs(x = "Body mass (g)", 
+       y = "Count", 
+       title = "Raw scale") +
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 13),
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    strip.background = element_blank()
+  )
+
+p_log <- ggplot(bm_data, aes(x = log10_body_mass_g)) +
+  geom_histogram(bins = 25, 
+                 fill = "steelblue", 
+                 color = "white") +
+  facet_wrap(~label, 
+             scales = "free", 
+             ncol = 4) +
+  labs(x = expression(log[10] ~ body ~ mass ~ (g)),
+       y = "Count",
+       title = "Log-transformed") +
+  theme_classic() +
+  theme(
+    axis.text = element_text(size = 11),
+    axis.title = element_text(size = 13),
+    plot.title = element_text(size = 14, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    strip.background = element_blank()
+  )
+
+# Combined histogram plots
+
+bm_distribution_plot <- p_raw / p_log +
+  plot_annotation(
+    title = "Distribution of body mass across selected mammalian orders",
+    subtitle = "Right-skewed raw distributions are normalised by log10-transformation",
+    theme = theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 13)
+    )
+  )
+
+print(bm_distribution_plot)
+
+plot_path <- "//wsl.localhost/Ubuntu/home/gianl/piezo1_pipeline/data_analysis/plots"
+
+ggsave("FigSX_body_mass_distr_all_orders.png",
+       plot = bm_distribution_plot,
+       path = plot_path,
+       width = 14, height = 7, dpi = 600)
+
+```
+
